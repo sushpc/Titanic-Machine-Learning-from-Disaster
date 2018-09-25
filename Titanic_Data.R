@@ -63,8 +63,8 @@ full$FamilySized=as.factor(full$FamilySized)
 
 ##### separating Training data from the full data and splitting it further into training and test data
 feature_data <- full %>% filter(set == "train") %>% select(Survived, Pclass, Sex, Age_Group, Fare, Cabin, Embarked, title, FamilySized)
-feature_data$Survived <- as.factor((feature_data$Survived))
-feature_data$Pclass <- as.factor((feature_data$Pclass))
+feature_data$Survived <- factor(feature_data$Survived, levels = c(0,1), labels = c("No","Yes"))
+feature_data$Pclass <- factor(feature_data$Pclass, levels = c(1,2,3), labels = c("Class1", "Class2", "Class3"))
 feature_data$Sex <- as.factor((feature_data$Sex))
 feature_data$Cabin <- as.factor((feature_data$Cabin))
 feature_data$Embarked <- as.factor((feature_data$Embarked))
@@ -78,7 +78,7 @@ split = sample.split(feature_data$Survived, SplitRatio = 0.8)
 training_set = subset(feature_data, split == TRUE)
 test_set = subset(feature_data, split == FALSE)
 
-####check the proprtion of Survival rate in orginal training data, current traing and testing data
+####check the proprtion of Survival rate in orginal training data, current training and testing data
 
 round(prop.table(table(train$Survived)*100),digits = 1)
 
@@ -91,6 +91,9 @@ RFmodel2 <- randomForest(formula2,data = training_set,ntree = 1000, importance =
 RFmodel3 <- randomForest(formula3,data = training_set,ntree = 1000, importance = TRUE)
 varImpPlot(RFmodel3)
 
+
+# Prediction on split test data
+
 test_set$pred <- predict(RFmodel1, test_set)
 test_set$pred2 <- predict(RFmodel2, test_set)
 test_set$pred3<- predict(RFmodel3, test_set)
@@ -99,8 +102,8 @@ table(test_set$Survived, test_set$pred3)
 
 ##### Test data for testing
 feature_data1 <- full %>% filter(set == "test") %>% select(Survived, Pclass, Sex, Age_Group, Fare, Cabin, Embarked, title, FamilySized)
-feature_data1$Survived <- as.factor((feature_data1$Survived))
-feature_data1$Pclass <- as.factor((feature_data1$Pclass))
+feature_data1$Survived <- factor(feature_data1$Survived, levels = c(0,1), labels = c("No","Yes"))
+feature_data1$Pclass <- factor(feature_data1$Pclass, levels = c(1,2,3), labels = c("Class1", "Class2", "Class3"))
 feature_data1$Sex <- as.factor((feature_data1$Sex))
 feature_data1$Cabin <- as.factor((feature_data1$Cabin))
 feature_data1$Embarked <- as.factor((feature_data1$Embarked))
@@ -109,7 +112,7 @@ feature_data1$Age_Group <- as.factor((feature_data1$Age_Group))
 feature_data1$FamilySized <- as.factor((feature_data1$FamilySized))
 
 finalTest <- feature_data1
-levels(finalTest$Cabin) <- levels(training_set$Cabin)
+levels(finalTest$Cabin) <- levels(feature_data$Cabin)
 
 Survival1 <- predict(RFmodel1, finalTest)
 Survival2 <- predict(RFmodel2, finalTest)
@@ -124,6 +127,22 @@ write_csv(Pred_table, "PredictionTitanic")
 ######### RFmodel3 gives 80% correct prediction....
 
 
+#Applying Grid search for hyperparameter tuning
+library(caret)
+myControl = trainControl(method = 'cv', number = 10, 
+                         summaryFunction = twoClassSummary, 
+                         allowParallel = TRUE,
+                         classProbs = TRUE, verboseIter = TRUE)
+model_rf <- train(formula2, data = feature_data, method = 'rf', 
+                  tuneGrid = expand.grid(mtry = seq(1,10,by=1)),
+                  ntrees= 500,trControl = myControl, metric = "ROC")
+
+# prediction on the final test data 
+Survived <- predict(model_rf, finalTest, type = 'raw')
+Survived <- ifelse(Survived == "Yes", 1, 0)
+Final_Pred <- data.frame(PassengerId = test$PassengerId, Survived)
+
+write_csv(Final_Pred, "PredictionTitanic.csv")
 
 #### Trying Naive_bayern Classification Technique
 
@@ -155,8 +174,50 @@ write_csv(Pred_table, "NB_prediction_titanic")
 
 
 
+# Modelling using XGBoost
+# One Hot Encoding of the dependent variables
+library(vtreat)
+vars <- colnames(feature_data[-1])
+treatplan <- designTreatmentsZ(feature_data, vars, verbose = FALSE)
+(newvars <- treatplan$scoreFrame %>%
+            filter(code %in% c("clean", "lev")) %>%
+            select(varName))
+newvars <- newvars$varName
+feature_data$Survived = factor(feature_data$Survived, levels = c("No", "Yes"), labels = c(0,1))
+feature_data1$Survived = factor(feature_data1$Survived, levels = c("No", "Yes"), labels = c(0,1))
+feature_data$Survived <- as.numeric(feature_data$Survived) - 1
+feature_data1$Survived <- as.numeric(feature_data1$Survived) - 1
+feature_data_treat <- prepare(treatplan, feature_data, varRestriction = newvars)
+finaltest_treat <- prepare(treatplan, feature_data1, varRestriction = newvars)
 
+# Finding the appropriate number of trees  # dependent variable has to be numeric for xgb to work
+cv <- xgb.cv(data = as.matrix(feature_data_treat), 
+             label = feature_data$Survived,
+             nrounds = 100,
+             nfold = 5,
+             objective = "binary:logistic",
+             eta = 0.3,
+             max_depth = 6,
+             early_stopping_rounds = 10,
+             verbose = 0    # silent
+)
 
+elog <- cv$evaluation_log # get the evaluation log
+# Determine and print how many trees minimize training and test error
+elog %>% 
+  summarize(ntrees.train = which.min((train_error_mean)),   # find the index of min(train_rmse_mean)
+            ntrees.test  = which.min((test_error_mean))) 
+ntree = cv$best_iteration
+model_xgb <- xgboost(data = as.matrix(feature_data_treat), # training data as matrix
+                     label = feature_data$Survived,  # column of outcomes
+                     nrounds = ntree,       # number of trees to build
+                     objective = "binary:logistic", # objective
+                     eta = 0.3,
+                     depth = 6,
+                     verbose = 0  # silent
+)
 
-
-
+Survived <- predict(model_xgb, as.matrix(feature_data1_treat), type = 'response')
+Survived <- ifelse(Survived >0.5, 1, 0)
+Final_Pred <- data.frame(PassengerId = test$PassengerId, Survived)
+write_csv(Final_Pred, "PredXGBoost.csv" )
